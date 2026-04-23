@@ -173,11 +173,35 @@ where
             let tx = self.internal_tx.clone();
             let tls_store = self.tls_store.clone();
             let shutdown = state.shutdown.child_token();
+
+            // Skip HTTP detection for unfiltered steal subscriptions.
+            // This allows server-first protocols (SMTP, FTP, etc.) to work correctly.
+            // Filtered subscriptions need HTTP detection for header matching.
+            // Filtered mirror subscribers won't receive non-HTTP traffic, which is expected.
+            let skip_http_detection = state.steal_tx.is_some() && !state.is_filtered;
+
             Self::spawn_tracked_connection(
                 self.internal_tx.clone(),
                 destination.port(),
                 state,
                 async move {
+                    if skip_http_detection {
+                        match MaybeHttp::new_tcp(conn) {
+                            Ok(conn) => {
+                                let _ = tx.send(InternalMessage::ConnInitialized(conn)).await;
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    %source,
+                                    %destination,
+                                    "Failed to create TCP connection (skipped HTTP detection)",
+                                );
+                            }
+                        }
+                        return;
+                    }
+
                     let detection_result = tokio::select! {
                         r = MaybeHttp::detect(conn, &tls_store) => r,
                         _ = shutdown.cancelled() => {
@@ -395,6 +419,7 @@ where
                         e.insert_entry(PortState {
                             steal_tx: None,
                             mirror_txs: vec![conn_tx.clone()],
+                            is_filtered: false,
                             shutdown: Default::default(),
                             connections: Default::default(),
                         });
@@ -413,25 +438,33 @@ where
                 let _ = receiver_tx.send(conn_rx);
             }
 
-            RedirectRequest::Steal { port, receiver_tx } => {
+            RedirectRequest::Steal {
+                port,
+                is_filtered,
+                receiver_tx,
+            } => {
                 let (conn_tx, conn_rx) = mpsc::channel(32);
 
                 match self.ports.entry(port) {
                     Entry::Vacant(e) => {
                         tracing::debug!(
                             from_port = port,
+                            is_filtered,
                             "Creating a new port redirection for a stealing client"
                         );
                         self.redirector.add_redirection(port).await?;
                         e.insert_entry(PortState {
                             steal_tx: Some(conn_tx.clone()),
                             mirror_txs: Default::default(),
+                            is_filtered,
                             shutdown: Default::default(),
                             connections: Default::default(),
                         });
                     }
                     Entry::Occupied(mut e) => {
-                        e.get_mut().steal_tx.replace(conn_tx.clone());
+                        let state = e.get_mut();
+                        state.steal_tx.replace(conn_tx.clone());
+                        state.is_filtered = is_filtered;
                     }
                 }
 
@@ -442,6 +475,12 @@ where
                 });
 
                 let _ = receiver_tx.send(conn_rx);
+            }
+
+            RedirectRequest::SetStealFiltered { port, is_filtered } => {
+                if let Some(state) = self.ports.get_mut(&port) {
+                    state.is_filtered = is_filtered;
+                }
             }
         }
 
@@ -584,11 +623,16 @@ pub type MirroredConnectionsRx = mpsc::Receiver<MirroredTraffic>;
 pub enum RedirectRequest {
     Steal {
         port: u16,
+        is_filtered: bool,
         receiver_tx: oneshot::Sender<StolenConnectionsRx>,
     },
     Mirror {
         port: u16,
         receiver_tx: oneshot::Sender<MirroredConnectionsRx>,
+    },
+    SetStealFiltered {
+        port: u16,
+        is_filtered: bool,
     },
 }
 
@@ -599,10 +643,18 @@ impl fmt::Debug for RedirectRequest {
                 .debug_struct("Mirror")
                 .field("port", port)
                 .finish_non_exhaustive(),
-            Self::Steal { port, .. } => f
+            Self::Steal {
+                port, is_filtered, ..
+            } => f
                 .debug_struct("Steal")
                 .field("port", port)
+                .field("is_filtered", is_filtered)
                 .finish_non_exhaustive(),
+            Self::SetStealFiltered { port, is_filtered } => f
+                .debug_struct("SetStealFiltered")
+                .field("port", port)
+                .field("is_filtered", is_filtered)
+                .finish(),
         }
     }
 }
@@ -658,6 +710,8 @@ struct PortState {
     steal_tx: Option<mpsc::Sender<StolenTraffic>>,
     /// Mirrorers' traffic channel.
     mirror_txs: Vec<mpsc::Sender<MirroredTraffic>>,
+    /// Whether the steal subscription is filtered (needs HTTP detection for header matching).
+    is_filtered: bool,
     /// Used to initiate a graceful shutdown of redirected
     /// connections, once the all clients cancel their subscriptions.
     shutdown: CancellationToken,
@@ -729,7 +783,7 @@ mod test {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
 
-        handle.steal(port).await.unwrap();
+        handle.steal(port, false).await.unwrap();
         assert!(state.borrow().has_redirections([port]));
 
         let mut tcp = tx.make_connection(listener.local_addr().unwrap()).await;
@@ -818,7 +872,7 @@ mod test {
         );
         tokio::spawn(task.run());
 
-        handle.steal(80).await.unwrap();
+        handle.steal(80, false).await.unwrap();
         assert!(state.borrow().has_redirections([80]));
 
         handle.stop_steal(80);
@@ -827,7 +881,7 @@ mod test {
             .await
             .unwrap();
 
-        handle.steal(81).await.unwrap();
+        handle.steal(81, false).await.unwrap();
         assert!(state.borrow().has_redirections([81]));
 
         std::mem::drop(handle);
@@ -856,7 +910,7 @@ mod test {
         );
         let redirector_task = tokio::spawn(task.run());
 
-        handle.steal(80).await.unwrap();
+        handle.steal(80, true).await.unwrap();
         let client_conn = conn_tx
             .make_connection("127.0.0.1:80".parse().unwrap())
             .await;
@@ -896,5 +950,123 @@ mod test {
         // Redirector task should exit.
         std::mem::drop(handle);
         redirector_task.await.unwrap().unwrap();
+    }
+
+    /// Test that HTTP detection is skipped for unfiltered steal subscriptions.
+    /// This allows server-first protocols (SMTP, FTP, etc.) to work correctly.
+    #[rstest]
+    #[timeout(Duration::from_secs(2))]
+    #[tokio::test]
+    async fn unfiltered_steal_skips_http_detection() {
+        let (redirector, mut state, mut conn_tx) = DummyRedirector::new();
+
+        let config = RedirectorTaskConfig {
+            inject_headers: false,
+        };
+
+        let (task, mut handle, _) = RedirectorTask::new(redirector, Default::default(), config);
+        tokio::spawn(task.run());
+
+        // Steal on port 25 with is_filtered=false (unfiltered subscription)
+        handle.steal(25, false).await.unwrap();
+        assert!(state.borrow().has_redirections([25]));
+
+        // Simulate a server-first protocol: server sends greeting, client waits
+        let mut tcp = conn_tx
+            .make_connection("127.0.0.1:25".parse().unwrap())
+            .await;
+
+        // Connection should be delivered as TCP immediately (no HTTP detection wait)
+        // If HTTP detection ran, this would timeout waiting for client to send first
+        let traffic = tokio::time::timeout(Duration::from_millis(500), handle.next())
+            .await
+            .expect("should not timeout - HTTP detection should be skipped")
+            .unwrap()
+            .unwrap();
+
+        let StolenTraffic::Tcp {
+            conn: rtcp,
+            join_handle_tx,
+            shutdown,
+        } = traffic
+        else {
+            panic!("expected TCP traffic, got HTTP");
+        };
+
+        // Verify the connection works: server sends first, then client responds
+        join_handle_tx
+            .send(tokio::spawn(async move {
+                let mut io = rtcp.into_io();
+
+                // Server sends greeting first (SMTP-like)
+                io.write_all(b"220 mail.example.com ESMTP\r\n")
+                    .await
+                    .unwrap();
+
+                // Client responds
+                let mut buf = [0; 4];
+                io.read_exact(&mut buf).await.unwrap();
+                assert_eq!(&buf, b"HELO");
+
+                let _ = shutdown.cancelled().await;
+            }))
+            .unwrap();
+
+        // Client receives server greeting and responds
+        let mut buf = [0; 28];
+        tcp.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"220 mail.example.com ESMTP\r\n");
+        tcp.write_all(b"HELO").await.unwrap();
+
+        drop(tcp);
+        handle.stop_steal(25);
+        state
+            .wait_for(|state| state.has_redirections([]))
+            .await
+            .unwrap();
+    }
+
+    /// Test that HTTP detection runs for filtered steal subscriptions.
+    #[rstest]
+    #[timeout(Duration::from_secs(5))]
+    #[tokio::test]
+    async fn filtered_steal_does_http_detection() {
+        let (redirector, _state, mut conn_tx) = DummyRedirector::new();
+
+        let config = RedirectorTaskConfig {
+            inject_headers: false,
+        };
+
+        let (task, mut handle, _) = RedirectorTask::new(redirector, Default::default(), config);
+        tokio::spawn(task.run());
+
+        // Steal on port 80 with is_filtered=true (filtered subscription)
+        handle.steal(80, true).await.unwrap();
+
+        let client_conn = conn_tx
+            .make_connection("127.0.0.1:80".parse().unwrap())
+            .await;
+
+        // Send HTTP request - should be detected as HTTP
+        let http_client_task = tokio::spawn(async {
+            let (mut sender, client_conn) =
+                hyper::client::conn::http1::handshake::<_, Empty<Bytes>>(TokioIo::new(client_conn))
+                    .await
+                    .unwrap();
+            tokio::spawn(client_conn);
+            sender.ready().await.unwrap();
+            sender
+                .send_request(hyper::Request::new(Default::default()))
+                .await
+        });
+
+        // Should be detected as HTTP traffic
+        let traffic = handle.next().await.unwrap().unwrap();
+        assert!(
+            matches!(traffic, StolenTraffic::Http(_)),
+            "expected HTTP traffic on port 80"
+        );
+
+        drop(http_client_task);
     }
 }

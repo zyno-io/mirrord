@@ -1,0 +1,1 @@
+When `feature.network.incoming.http_filter.ports` is set, HTTP detection is now skipped for ports not in that list. This allows server-first protocols (SMTP, FTP, etc.) to work correctly on non-HTTP ports.

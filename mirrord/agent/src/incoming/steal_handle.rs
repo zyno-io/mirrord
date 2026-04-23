@@ -47,7 +47,13 @@ impl StealHandle {
     /// If this method returns [`Ok`], it means that the port redirection
     /// was done in the [`RedirectorTask`](super::RedirectorTask),
     /// and incoming connections are now being stolen.
-    pub async fn steal(&mut self, port: u16) -> Result<(), RedirectorTaskError> {
+    ///
+    /// # Arguments
+    /// * `port` - The port to steal from.
+    /// * `is_filtered` - Whether the subscription uses HTTP filtering. When true, HTTP detection is
+    ///   performed to enable header-based filtering. When false, HTTP detection is skipped,
+    ///   allowing server-first protocols to work.
+    pub async fn steal(&mut self, port: u16, is_filtered: bool) -> Result<(), RedirectorTaskError> {
         if self.stolen_ports.contains_key(&port) {
             return Ok(());
         };
@@ -55,7 +61,11 @@ impl StealHandle {
         let (receiver_tx, receiver_rx) = oneshot::channel();
         if self
             .message_tx
-            .send(RedirectRequest::Steal { port, receiver_tx })
+            .send(RedirectRequest::Steal {
+                port,
+                is_filtered,
+                receiver_tx,
+            })
             .await
             .is_err()
         {
@@ -70,6 +80,17 @@ impl StealHandle {
             .insert(port, StreamNotifyClose::new(ReceiverStream::new(rx)));
 
         Ok(())
+    }
+
+    /// Updates whether a stolen port uses HTTP filtering.
+    ///
+    /// This should be called when the subscription type changes
+    /// (e.g., from filtered to unfiltered or vice versa).
+    pub async fn set_filtered(&self, port: u16, is_filtered: bool) {
+        let _ = self
+            .message_tx
+            .send(RedirectRequest::SetStealFiltered { port, is_filtered })
+            .await;
     }
 
     /// Stops stealing the given port.

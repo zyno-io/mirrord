@@ -91,6 +91,7 @@ impl PortSubscriptions {
                     STEAL_UNFILTERED_PORT_SUBSCRIPTION.fetch_sub(1, Ordering::Relaxed);
                     STEAL_FILTERED_PORT_SUBSCRIPTION.fetch_add(1, Ordering::Relaxed);
                     e.insert(PortSubscription::Filtered([(client_id, filter)].into()));
+                    self.handle.set_filtered(port, true).await;
                     true
                 }
 
@@ -113,13 +114,15 @@ impl PortSubscriptions {
                     STEAL_FILTERED_PORT_SUBSCRIPTION.fetch_sub(filters.len(), Ordering::Relaxed);
                     STEAL_UNFILTERED_PORT_SUBSCRIPTION.fetch_add(filters.len(), Ordering::Relaxed);
                     e.insert(PortSubscription::Unfiltered(client_id));
+                    self.handle.set_filtered(port, false).await;
                     true
                 }
             },
 
             Entry::Vacant(e) => {
-                self.handle.steal(port).await?;
-                if filter.is_some() {
+                let is_filtered = filter.is_some();
+                self.handle.steal(port, is_filtered).await?;
+                if is_filtered {
                     STEAL_FILTERED_PORT_SUBSCRIPTION.fetch_add(1, Ordering::Relaxed);
                 } else {
                     STEAL_UNFILTERED_PORT_SUBSCRIPTION.fetch_add(1, Ordering::Relaxed);
