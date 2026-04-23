@@ -23,7 +23,11 @@ pub mod retry;
 pub mod target;
 pub mod util;
 
-use std::{collections::HashMap, ffi::OsStr, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    ffi::OsStr,
+    path::Path,
+};
 
 use base64::prelude::*;
 use config::{ConfigContext, ConfigError, MirrordConfig};
@@ -655,6 +659,47 @@ impl LayerConfig {
                 "Cannot use both `incoming.ignore_ports` and `incoming.ports` at the same time"
                     .to_string(),
             ))?
+        }
+
+        if !self.feature.network.incoming.tcp_ports.is_empty()
+            && self.feature.network.incoming.http_filter.is_filter_set()
+        {
+            let http_filter_ports = self
+                .feature
+                .network
+                .incoming
+                .http_filter
+                .ports
+                .as_ref()
+                .map(|p| p.clone().to_vec().into_iter().collect::<HashSet<_>>());
+
+            let conflicting: Vec<u16> = match http_filter_ports {
+                Some(filter_ports) => self
+                    .feature
+                    .network
+                    .incoming
+                    .tcp_ports
+                    .intersection(&filter_ports)
+                    .copied()
+                    .collect(),
+                None => self
+                    .feature
+                    .network
+                    .incoming
+                    .tcp_ports
+                    .iter()
+                    .copied()
+                    .collect(),
+            };
+
+            if !conflicting.is_empty() {
+                return Err(ConfigError::Conflict(format!(
+                    "Ports {:?} are listed in both `tcp_ports` and covered by `http_filter`. \
+                    `tcp_ports` bypasses HTTP detection, which conflicts with HTTP filtering. \
+                    Remove these ports from either `tcp_ports` or `http_filter.ports`.",
+                    conflicting
+                )));
+            }
         }
 
         match (
@@ -1352,6 +1397,7 @@ mod tests {
                             ports: None,
                             https_delivery: Default::default(),
                             tls_delivery: Default::default(),
+                            tcp_ports: None,
                         }),
                     ))),
                     outgoing: Some(ToggleableConfig::Config(OutgoingFileConfig {
@@ -1751,5 +1797,75 @@ mod tests {
             error.to_string(),
             "invalid feature.network.incoming.http_filter value ``: HTTP filter `header_filter` cannot be an empty string",
         );
+    }
+
+    #[test]
+    fn tcp_ports_conflict_with_http_filter() {
+        let config = ConfigType::Json.parse(
+            r#"
+            {
+                "feature": {
+                    "network": {
+                        "incoming": {
+                            "mode": "steal",
+                            "tcp_ports": [25, 21],
+                            "http_filter": {
+                                "header_filter": "^baggage:.*$"
+                            }
+                        }
+                    }
+                }
+            }
+            "#,
+        );
+
+        let mut context = ConfigContext::default();
+        let resolved = config
+            .generate_config(&mut context)
+            .expect("config generation should succeed");
+        let error = resolved
+            .verify(&mut context)
+            .expect_err("tcp_ports with http_filter should conflict");
+
+        assert!(
+            error.to_string().contains("tcp_ports"),
+            "error should mention tcp_ports: {}",
+            error
+        );
+        assert!(
+            error.to_string().contains("http_filter"),
+            "error should mention http_filter: {}",
+            error
+        );
+    }
+
+    #[test]
+    fn tcp_ports_no_conflict_when_http_filter_ports_disjoint() {
+        let config = ConfigType::Json.parse(
+            r#"
+            {
+                "feature": {
+                    "network": {
+                        "incoming": {
+                            "mode": "steal",
+                            "tcp_ports": [25, 21],
+                            "http_filter": {
+                                "header_filter": "^baggage:.*$",
+                                "ports": [80, 443]
+                            }
+                        }
+                    }
+                }
+            }
+            "#,
+        );
+
+        let mut context = ConfigContext::default();
+        let resolved = config
+            .generate_config(&mut context)
+            .expect("config generation should succeed");
+        resolved
+            .verify(&mut context)
+            .expect("disjoint tcp_ports and http_filter.ports should not conflict");
     }
 }

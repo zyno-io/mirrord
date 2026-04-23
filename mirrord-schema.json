@@ -2404,6 +2404,20 @@
             "minimum": 0
           }
         },
+        "tcp_ports": {
+          "title": "tcp_ports",
+          "description": "Ports to treat as raw TCP, bypassing HTTP detection.\nUse this for protocols where the server sends first (SMTP, FTP, etc).\n\nBy default, mirrord waits for the first bytes on incoming connections to detect\nif the traffic is HTTP. This breaks server-first protocols. Ports listed here\nskip that detection and are handled as raw TCP immediately.\n\n**Note:** This option only works in OSS mode (without the operator).\nWhen using the mirrord operator, this setting is ignored.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0
+          }
+        },
         "tls_delivery": {
           "title": "tls_delivery",
           "description": "(Operator Only): configures how mirrord delivers stolen TLS traffic\nto the local application.",
