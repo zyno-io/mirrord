@@ -263,3 +263,44 @@ impl EnvValue for Vec<StealPortTlsConfig> {
         Ok(deserialized)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vec_u16_roundtrip() {
+        let ports = vec![25, 21, 110, 8080];
+        let repr = ports.as_repr().unwrap();
+        assert_eq!(repr, "25,21,110,8080");
+
+        let parsed = Vec::<u16>::from_repr(repr.as_bytes()).unwrap();
+        assert_eq!(parsed, ports);
+    }
+
+    #[test]
+    fn vec_u16_empty() {
+        let ports: Vec<u16> = vec![];
+        let repr = ports.as_repr().unwrap();
+        assert_eq!(repr, "");
+
+        let parsed = Vec::<u16>::from_repr(b"").unwrap();
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn vec_u16_single() {
+        let ports = vec![443];
+        let repr = ports.as_repr().unwrap();
+        assert_eq!(repr, "443");
+
+        let parsed = Vec::<u16>::from_repr(b"443").unwrap();
+        assert_eq!(parsed, ports);
+    }
+
+    #[test]
+    fn vec_u16_invalid_parse() {
+        let result = Vec::<u16>::from_repr(b"25,not_a_port,110");
+        assert!(result.is_err());
+    }
+}

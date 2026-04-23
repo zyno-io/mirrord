@@ -464,6 +464,7 @@ async fn header_injection(
         http_kind,
         RedirectorTaskConfig {
             inject_headers: true,
+            tcp_ports: Default::default(),
         },
     )
     .await;

@@ -919,4 +919,85 @@ mod test {
         std::mem::drop(handle);
         redirector_task.await.unwrap().unwrap();
     }
+
+    /// Test that tcp_ports bypasses HTTP detection, allowing server-first protocols.
+    ///
+    /// Simulates a server-first protocol (like SMTP) where the server sends
+    /// a greeting before the client sends anything.
+    #[rstest]
+    #[timeout(Duration::from_secs(5))]
+    #[tokio::test]
+    async fn tcp_ports_bypass_http_detection() {
+        let (redirector, mut state, mut tx) = DummyRedirector::new();
+
+        // Configure port 25 as TCP-only (simulating SMTP)
+        let config = RedirectorTaskConfig {
+            inject_headers: false,
+            tcp_ports: [25].into_iter().collect(),
+        };
+
+        let (task, mut handle, _) = RedirectorTask::new(redirector, Default::default(), config);
+        tokio::spawn(task.run());
+
+        // We use port 25 as destination (tcp_ports), simulating SMTP
+        handle.steal(25).await.unwrap();
+        assert!(state.borrow().has_redirections([25]));
+
+        // Create connection with destination port 25 - client doesn't send anything yet
+        let mut client = tx.make_connection("127.0.0.1:25".parse().unwrap()).await;
+
+        // The connection should be immediately available as TCP without waiting for client data
+        let StolenTraffic::Tcp {
+            conn: rtcp,
+            join_handle_tx,
+            shutdown,
+        } = handle.next().await.unwrap().unwrap()
+        else {
+            panic!("tcp_ports connection was not recognized as TCP");
+        };
+
+        join_handle_tx
+            .send(tokio::spawn(async move {
+                let mut io = rtcp.into_io();
+
+                // Server sends greeting first (simulating SMTP "220 mail.example.com ESMTP")
+                io.write_all(b"220 server ready\r\n").await.unwrap();
+
+                // Now client responds
+                let mut buf = [0; 4];
+                io.read_exact(&mut buf).await.unwrap();
+                assert_eq!(&buf, b"EHLO");
+
+                // Server responds
+                io.write_all(b"250 OK\r\n").await.unwrap();
+
+                tokio::select! {
+                    _ = shutdown.cancelled() => {},
+                    r = io.read(&mut buf) => {
+                        assert!(r.is_ok_and(|c| c == 0))
+                    }
+                }
+            }))
+            .unwrap();
+
+        // Client receives server greeting (server sent first!)
+        let mut buf = [0; 18];
+        client.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"220 server ready\r\n");
+
+        // Client sends response
+        client.write_all(b"EHLO").await.unwrap();
+
+        // Client receives server response
+        let mut buf = [0; 8];
+        client.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"250 OK\r\n");
+
+        // Cleanup
+        drop(client);
+        state
+            .wait_for(|state| state.has_redirections([]))
+            .await
+            .unwrap();
+    }
 }
