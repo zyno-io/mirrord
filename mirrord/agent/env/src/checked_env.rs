@@ -206,6 +206,33 @@ impl EnvValue for Vec<IpAddr> {
     }
 }
 
+impl EnvValue for Vec<u16> {
+    type IntoReprError = Infallible;
+    type FromReprError = ParseEnvError<std::num::ParseIntError>;
+
+    fn as_repr(&self) -> Result<String, Self::IntoReprError> {
+        Ok(self
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(","))
+    }
+
+    fn from_repr(repr: &[u8]) -> Result<Self, Self::FromReprError> {
+        let as_str = std::str::from_utf8(repr)?;
+
+        if as_str.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        as_str
+            .split(',')
+            .map(|item| item.parse::<u16>())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ParseEnvError::ParseError)
+    }
+}
+
 /// Errors that can occur when parsing [`STEAL_TLS_CONFIG`](crate::envs::STEAL_TLS_CONFIG) value.
 #[derive(Error, Debug)]
 pub enum ParseStealTlsConfigError {

@@ -92,6 +92,10 @@ pub(super) fn agent_env(agent: &AgentConfig, params: &ContainerParams) -> Vec<En
         env.push(envs::CLEAN_IPTABLES_ON_START.as_k8s_spec(&clean));
     }
 
+    if params.tcp_ports.is_empty().not() {
+        env.push(envs::TCP_PORTS.as_k8s_spec(&params.tcp_ports));
+    }
+
     env
 }
 

@@ -235,7 +235,17 @@ pub(crate) async fn create_and_connect<P: Progress, R: Reporter>(
         .inspect_err(|fail| tracing::debug!(?fail, "Failed to detect OpenShift!"))
         .ok();
 
-    let agent_container_config = ContainerConfig::default();
+    let agent_container_config = ContainerConfig {
+        tcp_ports: config
+            .feature
+            .network
+            .incoming
+            .tcp_ports
+            .iter()
+            .copied()
+            .collect(),
+        ..Default::default()
+    };
 
     let agent_connect_info = tokio::time::timeout(
         Duration::from_secs(config.agent.startup_timeout),

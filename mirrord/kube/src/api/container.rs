@@ -45,6 +45,8 @@ pub struct ContainerConfig {
     pub steal_tls_config: Vec<StealPortTlsConfig>,
     /// How long the agent should keep running after all client connections have been closed.
     pub idle_ttl: Duration,
+    /// Ports to treat as raw TCP, bypassing HTTP detection.
+    pub tcp_ports: Vec<u16>,
 }
 
 #[derive(Clone, Debug)]
@@ -64,6 +66,8 @@ pub struct ContainerParams {
     pub steal_tls_config: Vec<StealPortTlsConfig>,
     /// How long the agent should keep running after all client connections have been closed.
     pub idle_ttl: Duration,
+    /// Ports to treat as raw TCP, bypassing HTTP detection.
+    pub tcp_ports: Vec<u16>,
 }
 
 impl From<ContainerConfig> for ContainerParams {
@@ -88,6 +92,7 @@ impl From<ContainerConfig> for ContainerParams {
             pod_ips: value.pod_ips,
             steal_tls_config: value.steal_tls_config,
             idle_ttl: value.idle_ttl,
+            tcp_ports: value.tcp_ports,
         }
     }
 }

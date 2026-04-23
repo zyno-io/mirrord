@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::{HashMap, HashSet, hash_map::Entry},
     error::{Error, Report},
     fmt,
     ops::Not,
@@ -173,11 +173,30 @@ where
             let tx = self.internal_tx.clone();
             let tls_store = self.tls_store.clone();
             let shutdown = state.shutdown.child_token();
+            let is_tcp_only = self.config.tcp_ports.contains(&destination.port());
             Self::spawn_tracked_connection(
                 self.internal_tx.clone(),
                 destination.port(),
                 state,
                 async move {
+                    // For TCP-only ports, skip HTTP detection entirely
+                    if is_tcp_only {
+                        match MaybeHttp::new_tcp_only(conn) {
+                            Ok(conn) => {
+                                let _ = tx.send(InternalMessage::ConnInitialized(conn)).await;
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    %source,
+                                    %destination,
+                                    "Failed to create TCP-only connection",
+                                )
+                            }
+                        }
+                        return;
+                    }
+
                     let detection_result = tokio::select! {
                         r = MaybeHttp::detect(conn, &tls_store) => r,
                         _ = shutdown.cancelled() => {
@@ -558,12 +577,15 @@ impl<R> fmt::Debug for RedirectorTask<R> {
 pub struct RedirectorTaskConfig {
     /// Inject `Mirrord-Agent` headers into responses to stolen requests
     pub inject_headers: bool,
+    /// Ports to treat as raw TCP, bypassing HTTP detection.
+    pub tcp_ports: HashSet<u16>,
 }
 
 impl RedirectorTaskConfig {
     pub fn from_env() -> Self {
         Self {
             inject_headers: envs::INJECT_HEADERS.from_env_or_default(),
+            tcp_ports: envs::TCP_PORTS.from_env_or_default().into_iter().collect(),
         }
     }
 }

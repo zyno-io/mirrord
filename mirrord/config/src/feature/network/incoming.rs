@@ -136,6 +136,10 @@ impl MirrordConfig for IncomingFileConfig {
                 ports: advanced.ports.map(|ports| ports.into_iter().collect()),
                 https_delivery: advanced.https_delivery,
                 tls_delivery: advanced.tls_delivery,
+                tcp_ports: advanced
+                    .tcp_ports
+                    .map(|m| m.into_iter().collect())
+                    .unwrap_or_default(),
             },
         };
 
@@ -319,6 +323,19 @@ pub struct IncomingAdvancedFileConfig {
     /// (Operator Only): configures how mirrord delivers stolen TLS traffic
     /// to the local application.
     pub tls_delivery: Option<LocalTlsDelivery>,
+
+    /// ### tcp_ports
+    ///
+    /// Ports to treat as raw TCP, bypassing HTTP detection.
+    /// Use this for protocols where the server sends first (SMTP, FTP, etc).
+    ///
+    /// By default, mirrord waits for the first bytes on incoming connections to detect
+    /// if the traffic is HTTP. This breaks server-first protocols. Ports listed here
+    /// skip that detection and are handled as raw TCP immediately.
+    ///
+    /// **Note:** This option only works in OSS mode (without the operator).
+    /// When using the mirrord operator, this setting is ignored.
+    pub tcp_ports: Option<Vec<u16>>,
 }
 
 fn serialize_bi_map<S>(map: &BiMap<u16, u16>, serializer: S) -> Result<S::Ok, S::Error>
@@ -496,6 +513,14 @@ pub struct IncomingConfig {
     /// (Operator Only): configures how mirrord delivers stolen TLS traffic
     /// to the local application.
     pub tls_delivery: Option<LocalTlsDelivery>,
+
+    /// ##### feature.network.incoming.tcp_ports {#feature-network-incoming-tcp_ports}
+    ///
+    /// Ports to treat as raw TCP, bypassing HTTP detection.
+    /// Use this for protocols where the server sends first (SMTP, FTP, etc).
+    ///
+    /// **Note:** This option only works in OSS mode (without the operator).
+    pub tcp_ports: HashSet<u16>,
 }
 
 impl IncomingConfig {
